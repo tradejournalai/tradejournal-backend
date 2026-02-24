@@ -21,8 +21,7 @@ exports.register = async (req, res) => {
 
     // New code: Grant pro trial for 24hrs
     const now = new Date();
-    const proExpires = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000); // 7 days from now
-
+    const proExpires = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 24 hours
     const user = new User({
       username,
       email,
