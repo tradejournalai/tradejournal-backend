@@ -3,16 +3,17 @@ const crypto = require("crypto");
 
 const User = require("../models/User");
 const ReferralRedemption = require("../models/ReferralRedemption");
+const { sendMetaEvent } = require("../services/metaCapiService");
 
 // helper
 const addDays = (date, days) => new Date(date.getTime() + days * 86400000);
 
 const PLAN_PRICING = {
-  monthly: 99,   // 👈 change based on your pricing
-  annual: 799    // 👈 change based on your pricing
+  monthly: 1,
+  annual: 799,
 };
 
-// ✅ Create Razorpay Order (secure)
+// ✅ Create Razorpay Order
 const createOrder = async (req, res) => {
   try {
     const { userId, planType = "monthly" } = req.body;
@@ -34,15 +35,14 @@ const createOrder = async (req, res) => {
     let discountPercent = 0;
     let finalAmount = originalAmount;
 
-    // ✅ Apply referral discount only if unlocked
     if (user?.referral?.discountUnlocked === true && user?.referral?.discountPercent > 0) {
       discountApplied = true;
-      discountPercent = user.referral.discountPercent; // usually 10
+      discountPercent = user.referral.discountPercent;
       finalAmount = Math.round(originalAmount * (1 - discountPercent / 100));
     }
 
     const options = {
-      amount: finalAmount * 100, // paise
+      amount: finalAmount * 100,
       currency: "INR",
       receipt: `receipt_${Date.now()}_${userId}`,
       notes: {
@@ -50,8 +50,6 @@ const createOrder = async (req, res) => {
         plan: "Pro Subscription",
         planType,
         service: "TradeJournalAI",
-
-        // ✅ store amounts for verification
         originalAmount: String(originalAmount),
         finalAmount: String(finalAmount),
         discountApplied: discountApplied ? "yes" : "no",
@@ -83,7 +81,7 @@ const createOrder = async (req, res) => {
   }
 };
 
-// ✅ Verify Payment + Activate Subscription + Referral Reward
+// ✅ Verify Payment + Activate Subscription + Send CAPI
 const verifyPayment = async (req, res) => {
   try {
     const {
@@ -91,10 +89,13 @@ const verifyPayment = async (req, res) => {
       razorpay_payment_id,
       razorpay_signature,
       userId,
-      planType = "monthly"
+      planType = "monthly",
+      eventId, // 🔥 Important for deduplication
     } = req.body;
 
-    if (!userId) return res.status(400).json({ success: false, message: "userId required" });
+    if (!userId) {
+      return res.status(400).json({ success: false, message: "userId required" });
+    }
 
     const body = razorpay_order_id + "|" + razorpay_payment_id;
 
@@ -110,15 +111,19 @@ const verifyPayment = async (req, res) => {
       });
     }
 
-    // ✅ Payment verified
-    const user = await User.findById(userId).select("subscription referral");
-    if (!user) return res.status(404).json({ success: false, message: "User not found" });
+    // ✅ Fetch real payment amount from Razorpay
+    const payment = await razorpay.payments.fetch(razorpay_payment_id);
+    const amountPaid = payment.amount / 100; // convert paise → INR
+
+    const user = await User.findById(userId).select("subscription referral email");
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
 
     // ✅ Update subscription
     const now = new Date();
     const durationDays = planType === "annual" ? 365 : 30;
 
-    // if already has subscription and not expired, extend from expiresAt
     let baseDate = now;
     if (user.subscription?.expiresAt && user.subscription.expiresAt > now) {
       baseDate = user.subscription.expiresAt;
@@ -129,8 +134,6 @@ const verifyPayment = async (req, res) => {
     user.subscription.startedAt = user.subscription.startedAt || now;
     user.subscription.expiresAt = addDays(baseDate, durationDays);
 
-    // ✅ Consume referral discount after successful payment
-    // (so coupon cannot be reused)
     let referralDiscountUsed = false;
     if (user?.referral?.discountUnlocked === true) {
       referralDiscountUsed = true;
@@ -140,32 +143,34 @@ const verifyPayment = async (req, res) => {
 
     await user.save();
 
-    // ✅ Reward referrer (only once)
+    // ✅ Reward Referrer (unchanged logic)
     const redemption = await ReferralRedemption.findOne({
       referredUserId: user._id,
       rewardProcessed: false,
     });
 
     if (redemption) {
-      const referrer = await User.findById(redemption.referrerUserId).select("subscription referral");
+      const referrer = await User.findById(redemption.referrerUserId).select(
+        "subscription referral"
+      );
+
       if (referrer) {
         const refPlanType = referrer.subscription?.type || "monthly";
-        const rewardDays = refPlanType === "annual" ? 30 : 7; // 🎁 choose reward (7 days per paid referral)
+        const rewardDays = refPlanType === "annual" ? 30 : 7;
 
-        // extend referrer subscription
         let refBase = new Date();
-        if (referrer.subscription?.expiresAt && referrer.subscription.expiresAt > new Date()) {
+        if (
+          referrer.subscription?.expiresAt &&
+          referrer.subscription.expiresAt > new Date()
+        ) {
           refBase = referrer.subscription.expiresAt;
         }
 
-        // If referrer is still free but got reward, you can:
-        // Option A: just extend expiresAt
-        // Option B: also upgrade plan to pro
         referrer.subscription.plan = "pro";
-        referrer.subscription.startedAt = referrer.subscription.startedAt || new Date();
+        referrer.subscription.startedAt =
+          referrer.subscription.startedAt || new Date();
         referrer.subscription.expiresAt = addDays(refBase, rewardDays);
 
-        // update stats
         referrer.referral.stats.totalReferred += 1;
         referrer.referral.stats.totalRewardDays += rewardDays;
 
@@ -174,6 +179,31 @@ const verifyPayment = async (req, res) => {
         redemption.rewardProcessed = true;
         await redemption.save();
       }
+    }
+
+    // 🔥 SEND META CAPI EVENTS
+    try {
+      await sendMetaEvent({
+        eventName: "Purchase",
+        eventId: eventId || `purchase_${razorpay_payment_id}`,
+        email: user.email,
+        value: amountPaid,
+        currency: "INR",
+        clientIp: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
+
+      await sendMetaEvent({
+        eventName: "Subscribe",
+        eventId: eventId || `subscribe_${razorpay_payment_id}`,
+        email: user.email,
+        value: amountPaid,
+        currency: "INR",
+        clientIp: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
+    } catch (metaError) {
+      console.error("Meta CAPI failed:", metaError);
     }
 
     return res.json({
@@ -201,7 +231,7 @@ const getPaymentDetails = async (req, res) => {
 
     res.json({
       success: true,
-      payment: payment,
+      payment,
     });
   } catch (error) {
     console.error("Get Payment Error:", error);

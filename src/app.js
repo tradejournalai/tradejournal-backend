@@ -17,7 +17,7 @@ const optionRoutes = require('./routes/optionRoutes');
 const aiRoutes = require('./routes/aiRoutes');
 const contactRoutes = require('./routes/contactRoutes'); 
 const paymentRoutes = require('./routes/paymentRoutes');
-const referralRoutes = require("./routes/referralRoutes");
+
 
 
 
@@ -62,7 +62,7 @@ app.use("/api/options", optionRoutes);
 app.use("/api/ai", aiRoutes);
 app.use("/api/contact", contactRoutes); 
 app.use('/api/payments', paymentRoutes);
-app.use("/api/referral", referralRoutes);
+
 
 
 // Health check route (no rate limiting)
