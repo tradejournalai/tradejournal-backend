@@ -2,7 +2,6 @@ const razorpay = require("../services/razorpayService");
 const crypto = require("crypto");
 
 const User = require("../models/User");
-const ReferralRedemption = require("../models/ReferralRedemption");
 const { sendMetaEvent } = require("../services/metaCapiService");
 
 // helper
@@ -17,6 +16,7 @@ const PLAN_PRICING = {
 const createOrder = async (req, res) => {
   try {
     const { userId, planType = "monthly" } = req.body;
+    console.log("Create order body:", req.body);
 
     if (!userId) {
       return res.status(400).json({ success: false, message: "userId is required" });
@@ -26,23 +26,15 @@ const createOrder = async (req, res) => {
       return res.status(400).json({ success: false, message: "Invalid planType" });
     }
 
-    const user = await User.findById(userId).select("subscription referral");
-    if (!user) return res.status(404).json({ success: false, message: "User not found" });
-
-    const originalAmount = PLAN_PRICING[planType];
-
-    let discountApplied = false;
-    let discountPercent = 0;
-    let finalAmount = originalAmount;
-
-    if (user?.referral?.discountUnlocked === true && user?.referral?.discountPercent > 0) {
-      discountApplied = true;
-      discountPercent = user.referral.discountPercent;
-      finalAmount = Math.round(originalAmount * (1 - discountPercent / 100));
+    const user = await User.findById(userId).select("subscription");
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
     }
 
+    const amount = PLAN_PRICING[planType];
+
     const options = {
-      amount: finalAmount * 100,
+      amount: amount * 100,
       currency: "INR",
       receipt: `receipt_${Date.now()}_${userId}`,
       notes: {
@@ -50,10 +42,7 @@ const createOrder = async (req, res) => {
         plan: "Pro Subscription",
         planType,
         service: "TradeJournalAI",
-        originalAmount: String(originalAmount),
-        finalAmount: String(finalAmount),
-        discountApplied: discountApplied ? "yes" : "no",
-        discountPercent: String(discountPercent),
+        amount: String(amount),
       },
     };
 
@@ -66,10 +55,6 @@ const createOrder = async (req, res) => {
       currency: order.currency,
       keyId: process.env.RAZORPAY_KEY_ID,
       planType,
-      discountApplied,
-      discountPercent,
-      payableAmount: finalAmount,
-      originalAmount,
     });
   } catch (error) {
     console.error("Create Order Error:", error);
@@ -90,7 +75,7 @@ const verifyPayment = async (req, res) => {
       razorpay_signature,
       userId,
       planType = "monthly",
-      eventId, // 🔥 Important for deduplication
+      eventId,
     } = req.body;
 
     if (!userId) {
@@ -113,9 +98,9 @@ const verifyPayment = async (req, res) => {
 
     // ✅ Fetch real payment amount from Razorpay
     const payment = await razorpay.payments.fetch(razorpay_payment_id);
-    const amountPaid = payment.amount / 100; // convert paise → INR
+    const amountPaid = payment.amount / 100;
 
-    const user = await User.findById(userId).select("subscription referral email");
+    const user = await User.findById(userId).select("subscription email");
     if (!user) {
       return res.status(404).json({ success: false, message: "User not found" });
     }
@@ -134,52 +119,7 @@ const verifyPayment = async (req, res) => {
     user.subscription.startedAt = user.subscription.startedAt || now;
     user.subscription.expiresAt = addDays(baseDate, durationDays);
 
-    let referralDiscountUsed = false;
-    if (user?.referral?.discountUnlocked === true) {
-      referralDiscountUsed = true;
-      user.referral.discountUnlocked = false;
-      user.referral.discountPercent = 0;
-    }
-
     await user.save();
-
-    // ✅ Reward Referrer (unchanged logic)
-    const redemption = await ReferralRedemption.findOne({
-      referredUserId: user._id,
-      rewardProcessed: false,
-    });
-
-    if (redemption) {
-      const referrer = await User.findById(redemption.referrerUserId).select(
-        "subscription referral"
-      );
-
-      if (referrer) {
-        const refPlanType = referrer.subscription?.type || "monthly";
-        const rewardDays = refPlanType === "annual" ? 30 : 7;
-
-        let refBase = new Date();
-        if (
-          referrer.subscription?.expiresAt &&
-          referrer.subscription.expiresAt > new Date()
-        ) {
-          refBase = referrer.subscription.expiresAt;
-        }
-
-        referrer.subscription.plan = "pro";
-        referrer.subscription.startedAt =
-          referrer.subscription.startedAt || new Date();
-        referrer.subscription.expiresAt = addDays(refBase, rewardDays);
-
-        referrer.referral.stats.totalReferred += 1;
-        referrer.referral.stats.totalRewardDays += rewardDays;
-
-        await referrer.save();
-
-        redemption.rewardProcessed = true;
-        await redemption.save();
-      }
-    }
 
     // 🔥 SEND META CAPI EVENTS
     try {
@@ -211,7 +151,6 @@ const verifyPayment = async (req, res) => {
       message: "Payment verified successfully",
       paymentId: razorpay_payment_id,
       subscription: user.subscription,
-      referralDiscountUsed,
     });
   } catch (error) {
     console.error("Payment Verification Error:", error);
@@ -227,6 +166,7 @@ const verifyPayment = async (req, res) => {
 const getPaymentDetails = async (req, res) => {
   try {
     const { paymentId } = req.params;
+
     const payment = await razorpay.payments.fetch(paymentId);
 
     res.json({
