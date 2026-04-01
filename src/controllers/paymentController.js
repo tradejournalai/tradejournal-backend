@@ -36,7 +36,7 @@ const createOrder = async (req, res) => {
     const options = {
       amount: amount * 100,
       currency: "INR",
-      receipt: `receipt_${Date.now()}_${userId}`,
+      receipt: `order_${userId.toString().slice(-10)}_${Date.now().toString().slice(-6)}`,
       notes: {
         userId: String(userId),
         plan: "Pro Subscription",
@@ -57,11 +57,16 @@ const createOrder = async (req, res) => {
       planType,
     });
   } catch (error) {
-    console.error("Create Order Error:", error);
+    console.error("CRITICAL ORDER ERROR:", error);
+    
+    // Razorpay errors often nested in error.error or error.description
+    const errorMessage = error.description || error.message || "Unknown Razorpay Error";
+    
     res.status(500).json({
       success: false,
       message: "Failed to create order",
-      error: error.message,
+      error: errorMessage, 
+      details: error // This helps you see the full object in the Network tab
     });
   }
 };
