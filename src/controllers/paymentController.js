@@ -8,7 +8,7 @@ const { sendMetaEvent } = require("../services/metaCapiService");
 const addDays = (date, days) => new Date(date.getTime() + days * 86400000);
 
 const PLAN_PRICING = {
-  monthly: 1,
+  monthly: 99,
   annual: 799,
 };
 
